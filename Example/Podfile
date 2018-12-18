@@ -1,0 +1,6 @@
+use_frameworks!
+target 'SSBEncoder_Tests' do
+  pod 'SSBEncoder', :path => '../'
+  
+  
+end
