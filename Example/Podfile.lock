@@ -1,0 +1,16 @@
+PODS:
+  - SSBEncoder (0.1.0)
+
+DEPENDENCIES:
+  - SSBEncoder (from `../`)
+
+EXTERNAL SOURCES:
+  SSBEncoder:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  SSBEncoder: 989b3542c4ffbf7e43fc4a51fe36bc32f99bd249
+
+PODFILE CHECKSUM: 788ae0809a67c79d4c9f219073a821b661b4defa
+
+COCOAPODS: 1.6.0.beta.2
