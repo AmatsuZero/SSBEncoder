@@ -5,7 +5,8 @@
 //  Created by Jiang,Zhenhua on 2018/12/18.
 //
 
-import Foundation
+import UIKit
+import AVFoundation
 
 @objcMembers open class SSBAudioConfiguration: NSObject, NSCopying, NSCoding {
     
@@ -100,7 +101,6 @@ import Foundation
         public static var `default`: AudioQuality { return high }
     }
     
-    fileprivate var quality: AudioQuality
     /// 采样率
     public var sampleRate: AudioQuality.AudioSampleRate {
         didSet {
@@ -130,7 +130,6 @@ import Foundation
     }
     
     public init(quality: AudioQuality = .default) {
-        self.quality = quality
         numberOfChannels = 2
         sampleRate = quality.sampleRate
         audioBitRate = quality.bitRate(numberOfChannels)
@@ -141,7 +140,6 @@ import Foundation
         numberOfChannels = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: numberOfChannels)))
         sampleRate = .init(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: sampleRate))))
         audioBitRate = .init(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: audioBitRate))))
-        quality = .init(sampleRate: sampleRate)
         super.init()
     }
     
@@ -153,7 +151,7 @@ import Foundation
     }
     
     public func copy(with zone: NSZone? = nil) -> Any {
-        let instance = SSBAudioConfiguration(quality: quality)
+        let instance = SSBAudioConfiguration()
         instance.numberOfChannels = numberOfChannels
         instance.audioBitRate = audioBitRate
         instance.sampleRate = sampleRate
@@ -178,5 +176,390 @@ import Foundation
         hasher.combine(sampleRate)
         hasher.combine(_asc)
         return hasher.finalize()
+    }
+    
+    open override var description: String {
+        return """
+        <LFLiveAudioConfiguration: \(self)>
+            numberOfChannels: \(numberOfChannels)
+            audioSampleRate: \(sampleRate)
+            audioBitrate: \(audioBitRate)
+            audioHeader: \(String(cString: asc))
+        """
+    }
+}
+
+@objcMembers open class SSBVideoConfiguration: NSObject, NSCoding, NSCopying {
+   
+    /// 视频质量
+    @objc public enum VideoQuality: Int {
+        
+        /// 视频分辨率(都是16：9 当此设备不支持当前分辨率，自动降低一级)
+        @objc public enum VideoSessionPreset: Int {
+            /// 低分辨率, 360x640
+            case low = 0
+            /// 中分辨率,540x960
+            case medium
+            /// 高分辨率，720x1280
+            case high
+            
+            public var size: CGSize {
+                switch self {
+                case .low: return .init(width: 360, height: 640)
+                case .medium: return .init(width: 540, height: 960)
+                case .high: return .init(width: 720, height: 1280)
+                }
+            }
+            
+            public var avSessionPreset: AVCaptureSession.Preset {
+                switch self {
+                case .low: return .vga640x480
+                case .medium: return .iFrame960x540
+                case .high: return .iFrame1280x720
+                }
+            }
+            
+            public init?(rawValue: Int) {
+                switch rawValue {
+                case 0: self = .low
+                case 1: self = .medium
+                case 2: self = .high
+                default: return nil
+                }
+            }
+            
+            mutating func support() {
+                let device = AVCaptureDevice
+                    .devices(for: .video)
+                    .filter { $0.position == .front }
+                    .first
+                guard let inputCamera = device,
+                    let videoInput = try? AVCaptureDeviceInput(device: inputCamera) else {
+                    return
+                }
+                let session = AVCaptureSession()
+                if session.canAddInput(videoInput) {
+                    session.addInput(videoInput)
+                }
+                if !session.canSetSessionPreset(avSessionPreset) {
+                    if self == .high {
+                        self = .medium
+                        if !session.canSetSessionPreset(avSessionPreset) {
+                            self = .low
+                        }
+                    } else if self == .medium {
+                        self = .low
+                    }
+                }
+            }
+        }
+        
+        /// 分辨率： 360 *640 帧数：15 码率：500Kps
+        case low1 = 0
+        /// 分辨率： 360 *640 帧数：24 码率：800Kps
+        case low2
+        /// 分辨率： 360 *640 帧数：30 码率：800Kps
+        case low3
+        /// 分辨率： 540 *960 帧数：15 码率：800Kps
+        case medium1
+        /// 分辨率： 540 *960 帧数：24 码率：800Kps
+        case medium2
+        /// 分辨率： 540 *960 帧数：30 码率：800Kps
+        case medium3
+        /// 分辨率： 720 *1280 帧数：15 码率：1000Kps
+        case high1
+        /// 分辨率： 720 *1280 帧数：24 码率：1200Kps
+        case high2
+        /// 分辨率： 720 *1280 帧数：30 码率：1200Kps
+        case high3
+        /// 默认配置
+        public static var `default`: VideoQuality { return low2 }
+        
+        public var sessionPreset: VideoSessionPreset {
+            switch self {
+            case .low1, .low2, .low3: return .low
+            case .medium1, .medium2, .medium3: return .medium
+            case .high1, .high2, .high3: return .high
+            }
+        }
+        
+        public var frameRate: Int {
+            switch self {
+            case .low1, .medium1, .high1: return 15
+            case .low2, .medium2, .high2: return 24
+            case .low3, .medium3, .high3: return 30
+            }
+        }
+        
+        public var maxFrameRate: Int {
+            return frameRate
+        }
+        
+        public var minFrameRate: Int {
+            switch self {
+            case .low1, .medium1, .high1: return 10
+            case .low2, .medium2, .high2: return 12
+            case .low3, .medium3, .high3: return 15
+            }
+        }
+        
+        public var bitRate: Int {
+            switch self {
+            case .low1: return 500 * 1000
+            case .low2: return 600 * 1000
+            case .low3, .medium1, .medium2: return 800 * 1000
+            case .medium3, .high1: return 1000 * 1000
+            case .high2, .high3: return 1200 * 1000
+            }
+        }
+        
+        public var maxBitRate: Int {
+            switch self {
+            case .low1: return 600 * 1000
+            case .low2: return 720 * 1000
+            case .low3, .medium1, .medium2: return 960 * 1000
+            case .medium3, .high1: return 1200 * 1000
+            case .high2, .high3: return 1440 * 1000
+            }
+        }
+        
+        public var minBitRate: Int {
+            switch self {
+            case .low1: return 400 * 1000
+            case .low2, .medium1, .medium2, .medium3, .high1, .high3: return 500 * 1000
+            case .low3: return 600 * 1000
+            case .high2: return 800 * 1000
+            }
+        }
+    }
+   
+    private var _videoSize: CGSize
+     /// 视频的分辨率，宽高务必设定为 2 的倍数，否则解码播放时可能出现绿边(这个videoSizeRespectingAspectRatio设置为YES则可能会改变)
+    public var videoSize: CGSize {
+        set {
+            _videoSize = newValue
+        }
+        get {
+            return isVideoSizeRespectingAspectRatio ? aspectRatioVideoSize : _videoSize
+        }
+    }
+    /// 输出图像是否等比例,默认为NO
+    public var isVideoSizeRespectingAspectRatio = false
+    /// 自动旋转(这里只支持 left 变 right  portrait 变 portraitUpsideDown)
+    public var isAutorotate = false
+    /// 视频的帧率，即 fps
+    public var videoFrameRate: Int
+    
+    private var _videoMaxFrameRate: Int
+    /// 视频的最大帧率，即 fps
+    public var videoMaxFrameRate: Int {
+        set {
+            guard newValue > _videoMaxFrameRate else {
+                return
+            }
+            _videoMaxFrameRate = newValue
+        }
+        get {
+            return _videoMaxFrameRate
+        }
+    }
+    private var _videoMinFrameRate: Int
+    /// 视频的最小帧率，即 fps
+    public var videoMinFrameRate: Int {
+        set {
+            guard newValue < _videoMinFrameRate else {
+                return
+            }
+            _videoMinFrameRate = newValue
+        }
+        get {
+            return _videoMinFrameRate
+        }
+    }
+    /// 最大关键帧间隔，可设定为 fps 的2倍，影响一个 gop 的大小
+    public var videoMaxKeyframeInterval: Int
+    /// 视频的最大码率，单位是 bps
+    public var videoBitRate: Int
+    
+    private var _videoMaxBitRate: Int
+    /// 视频的最大码率，单位是 bps
+    public var videoMaxBitRate: Int {
+        set {
+            guard newValue > _videoMaxBitRate else {
+                return
+            }
+            _videoMaxBitRate = newValue
+        }
+        get {
+            return _videoMaxBitRate
+        }
+    }
+    private var _videoMinBitRate: Int
+    /// 视频的最小码率，单位是 bps
+    public var videoMinBitRate: Int {
+        set {
+            guard newValue < _videoMinBitRate else {
+                return
+            }
+            _videoMinBitRate = newValue
+        }
+        get {
+            return _videoMinBitRate
+        }
+    }
+    /// 是否是横屏
+    public var isLandscape: Bool {
+        return outputImageOrientation == .landscapeLeft || outputImageOrientation == .landscapeRight
+    }
+    /// sde3分辨率
+    public var avSessionPresset: AVCaptureSession.Preset {
+        return sessionPreset.avSessionPreset
+    }
+    /// 分辨率
+    public var sessionPreset: VideoQuality.VideoSessionPreset {
+        didSet {
+            sessionPreset.support()
+        }
+    }
+    /// 视频输出方向
+    public var outputImageOrientation: UIInterfaceOrientation
+    
+    private var captureOutVideoSize: CGSize {
+        let videoSize = sessionPreset.size
+        return isLandscape ? CGSize(width: videoSize.height, height: videoSize.width) : videoSize
+    }
+    
+    private var aspectRatioVideoSize: CGSize {
+        let size = AVMakeRect(aspectRatio: captureOutVideoSize,
+                              insideRect: .init(origin: .zero, size: videoSize)).size
+        var width = ceil(size.width)
+        var height = ceil(size.height)
+        if width.truncatingRemainder(dividingBy: 2) != 0 {
+            width -= 1
+        }
+        if height.truncatingRemainder(dividingBy: 2) != 0 {
+            height -= 1
+        }
+        return .init(width: width, height: height)
+    }
+    
+    public init(quality: VideoQuality = .default, outputImageOrientation: UIInterfaceOrientation = .portrait) {
+        sessionPreset = quality.sessionPreset
+        videoFrameRate = quality.frameRate
+        _videoMaxFrameRate = quality.maxFrameRate
+        _videoMinFrameRate = quality.minFrameRate
+        videoBitRate = quality.bitRate
+        _videoMaxBitRate = quality.maxBitRate
+        _videoMinBitRate = quality.minBitRate
+        videoMaxKeyframeInterval = videoFrameRate * 2
+        self.outputImageOrientation = outputImageOrientation
+        _videoSize = sessionPreset.size
+        super.init()
+        if isLandscape {
+            videoSize = CGSize(width: videoSize.height, height: videoSize.width)
+        }
+    }
+
+    public required init?(coder aDecoder: NSCoder) {
+        _videoSize = aDecoder.decodeCGSize(forKey: NSStringFromSelector(#selector(getter: videoSize)))
+        videoFrameRate = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoFrameRate)))
+        _videoMaxFrameRate = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoMaxFrameRate)))
+        _videoMinFrameRate = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoMinFrameRate)))
+        videoMaxKeyframeInterval = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoMaxKeyframeInterval)))
+        videoBitRate = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoBitRate)))
+        _videoMaxBitRate = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoMaxBitRate)))
+        _videoMinBitRate = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: videoMinBitRate)))
+        sessionPreset = VideoQuality.VideoSessionPreset(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: sessionPreset)))) ?? .low
+        outputImageOrientation = UIInterfaceOrientation(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: outputImageOrientation)))) ?? .portrait
+        isVideoSizeRespectingAspectRatio = aDecoder.decodeBool(forKey: NSStringFromSelector(#selector(getter: isVideoSizeRespectingAspectRatio)))
+        isAutorotate = aDecoder.decodeBool(forKey: NSStringFromSelector(#selector(getter: isAutorotate)))
+        super.init()
+    }
+    
+    public func encode(with aCoder: NSCoder) {
+        aCoder.encode(_videoSize, forKey: NSStringFromSelector(#selector(getter: videoSize)))
+        aCoder.encode(videoFrameRate, forKey: NSStringFromSelector(#selector(getter: videoFrameRate)))
+        aCoder.encode(_videoMaxFrameRate, forKey: NSStringFromSelector(#selector(getter: videoMaxFrameRate)))
+        aCoder.encode(_videoMinFrameRate, forKey: NSStringFromSelector(#selector(getter: videoMinFrameRate)))
+        aCoder.encode(videoMaxKeyframeInterval, forKey: NSStringFromSelector(#selector(getter: videoMaxKeyframeInterval)))
+        aCoder.encode(videoBitRate, forKey: NSStringFromSelector(#selector(getter: videoBitRate)))
+        aCoder.encode(_videoMaxBitRate, forKey: NSStringFromSelector(#selector(getter: videoMaxBitRate)))
+        aCoder.encode(_videoMinBitRate, forKey: NSStringFromSelector(#selector(getter: videoMinBitRate)))
+        aCoder.encode(sessionPreset.rawValue, forKey: NSStringFromSelector(#selector(getter: sessionPreset)))
+        aCoder.encode(outputImageOrientation.rawValue, forKey: NSStringFromSelector(#selector(getter: outputImageOrientation)))
+        aCoder.encode(isVideoSizeRespectingAspectRatio, forKey: NSStringFromSelector(#selector(getter: isVideoSizeRespectingAspectRatio)))
+        aCoder.encode(isAutorotate, forKey: NSStringFromSelector(#selector(getter: isAutorotate)))
+    }
+    
+    public func copy(with zone: NSZone? = nil) -> Any {
+        let other = SSBVideoConfiguration()
+        other.videoBitRate = videoBitRate
+        other.videoSize = videoSize
+        other.videoFrameRate = videoFrameRate
+        other.videoMaxFrameRate = videoMaxFrameRate
+        other.videoMinFrameRate = videoMinFrameRate
+        other.videoMaxKeyframeInterval = videoMaxKeyframeInterval
+        other.videoMaxBitRate = videoMaxBitRate
+        other.videoMinBitRate = videoMinBitRate
+        other.sessionPreset = sessionPreset
+        other.outputImageOrientation = outputImageOrientation
+        other.isAutorotate = isAutorotate
+        other.isVideoSizeRespectingAspectRatio = isVideoSizeRespectingAspectRatio
+        return other
+    }
+    
+    open override var hash: Int {
+        var hasher = Hasher()
+        hasher.combine(NSValue(cgSize: videoSize))
+        hasher.combine(videoFrameRate)
+        hasher.combine(videoMaxFrameRate)
+        hasher.combine(videoMinFrameRate)
+        hasher.combine(videoMaxKeyframeInterval)
+        hasher.combine(videoBitRate)
+        hasher.combine(videoMaxBitRate)
+        hasher.combine(videoMinBitRate)
+        hasher.combine(avSessionPresset)
+        hasher.combine(sessionPreset)
+        hasher.combine(outputImageOrientation)
+        hasher.combine(isAutorotate)
+        hasher.combine(isVideoSizeRespectingAspectRatio)
+        return hasher.finalize()
+    }
+    
+    open override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? SSBVideoConfiguration else {
+            return false
+        }
+        return videoSize == other.videoSize
+            && videoFrameRate == other.videoFrameRate
+            && videoMaxFrameRate == other.videoMaxFrameRate
+            && videoMaxKeyframeInterval == other.videoMaxKeyframeInterval
+            && videoBitRate == other.videoBitRate
+            && videoMaxBitRate == other.videoMaxBitRate
+            && videoMinBitRate == other.videoMinBitRate
+            && avSessionPresset == other.avSessionPresset
+            && sessionPreset == other.sessionPreset
+            && outputImageOrientation == other.outputImageOrientation
+            && isAutorotate == other.isAutorotate
+            && isVideoSizeRespectingAspectRatio == other.isVideoSizeRespectingAspectRatio
+    }
+    
+    open override var description: String {
+        return """
+        <LFLiveVideoConfiguration: \(self)>
+            videoSize: \(videoSize)
+            videoSizeRespectingAspectRatio: \(isVideoSizeRespectingAspectRatio)
+            videoFrameRate: \(videoFrameRate)
+            videoMaxFrameRate: \(videoMaxFrameRate)
+            videoMinFrameRate: \(videoMinFrameRate)
+            videoMaxKeyframeInterval: \(videoMaxKeyframeInterval)
+            videoBitRate: \(videoBitRate)
+            videoMaxBitRate: \(videoMaxBitRate)
+            videoMinBitRate: \(videoMinBitRate)
+            avSessionPreset: \(avSessionPresset)
+            sessionPreset: \(sessionPreset)
+            outputImageOrientation: \(outputImageOrientation)
+            autorotate: \(isAutorotate)
+        """
     }
 }

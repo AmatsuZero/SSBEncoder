@@ -14,13 +14,13 @@
 /* Begin PBXFileReference section */
 		0C9A80BAD70E77167DC2D5B3 /* Pods-SSBEncoder_Tests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SSBEncoder_Tests.debug.xcconfig"; path = "Target Support Files/Pods-SSBEncoder_Tests/Pods-SSBEncoder_Tests.debug.xcconfig"; sourceTree = "<group>"; };
 		2CE62BC505659331F8ECD19C /* Pods_SSBEncoder_Tests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SSBEncoder_Tests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		321090FF6E943D770D2BC7C8 /* SSBEncoder.podspec */ = {isa = PBXFileReference; includeInIndex = 1; name = SSBEncoder.podspec; path = ../SSBEncoder.podspec; sourceTree = "<group>"; };
+		321090FF6E943D770D2BC7C8 /* SSBEncoder.podspec */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text; name = SSBEncoder.podspec; path = ../SSBEncoder.podspec; sourceTree = "<group>"; xcLanguageSpecificationIdentifier = xcode.lang.ruby; };
 		607FACE51AFB9204008FA782 /* SSBEncoder_Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SSBEncoder_Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		607FACEA1AFB9204008FA782 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		607FACEB1AFB9204008FA782 /* Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests.swift; sourceTree = "<group>"; };
-		A8BE402B4C58136A0CA25310 /* LICENSE */ = {isa = PBXFileReference; includeInIndex = 1; name = LICENSE; path = ../LICENSE; sourceTree = "<group>"; };
+		A8BE402B4C58136A0CA25310 /* LICENSE */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text; name = LICENSE; path = ../LICENSE; sourceTree = "<group>"; };
 		B2A49CC32E5240224E6DBACC /* Pods-SSBEncoder_Tests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SSBEncoder_Tests.release.xcconfig"; path = "Target Support Files/Pods-SSBEncoder_Tests/Pods-SSBEncoder_Tests.release.xcconfig"; sourceTree = "<group>"; };
-		ED28163337BFEFE29A104404 /* README.md */ = {isa = PBXFileReference; includeInIndex = 1; name = README.md; path = ../README.md; sourceTree = "<group>"; };
+		ED28163337BFEFE29A104404 /* README.md */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = ../README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -95,7 +95,6 @@
 				0C9A80BAD70E77167DC2D5B3 /* Pods-SSBEncoder_Tests.debug.xcconfig */,
 				B2A49CC32E5240224E6DBACC /* Pods-SSBEncoder_Tests.release.xcconfig */,
 			);
-			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
 		};
@@ -131,10 +130,6 @@
 				LastUpgradeCheck = 0830;
 				ORGANIZATIONNAME = CocoaPods;
 				TargetAttributes = {
-					607FACCF1AFB9204008FA782 = {
-						CreatedOnToolsVersion = 6.3.1;
-						LastSwiftMigration = 0900;
-					};
 					607FACE41AFB9204008FA782 = {
 						CreatedOnToolsVersion = 6.3.1;
 						LastSwiftMigration = 0900;
