@@ -24,16 +24,6 @@ import AVFoundation
             case veryHigh = 128000
             /// 默认音频码率，默认为 96Kbps
             public static var `default`: AudioBitRate { return high }
-            
-            public init(rawValue: Int) {
-                switch rawValue {
-                case AudioBitRate.low.rawValue: self = .low
-                case AudioBitRate.medium.rawValue: self = .medium
-                case AudioBitRate.high.rawValue: self = .high
-                case AudioBitRate.veryHigh.rawValue: self = .veryHigh
-                default: self = AudioBitRate.default
-                }
-            }
         }
         
         /// 音频采样率 (默认44.1KHz)
@@ -52,15 +42,6 @@ import AVFoundation
                 case .low: return 8
                 case .medium: return 4
                 case .high: return 3
-                }
-            }
-            
-            public init(rawValue:Int) {
-                switch rawValue {
-                case AudioSampleRate.low.rawValue: self = .low
-                case AudioSampleRate.medium.rawValue: self = .medium
-                case AudioSampleRate.high.rawValue: self = .high
-                default: self = AudioSampleRate.default
                 }
             }
         }
@@ -138,8 +119,8 @@ import AVFoundation
     
     public required init?(coder aDecoder: NSCoder) {
         numberOfChannels = aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: numberOfChannels)))
-        sampleRate = .init(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: sampleRate))))
-        audioBitRate = .init(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: audioBitRate))))
+        sampleRate = AudioQuality.AudioSampleRate(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: sampleRate)))) ?? .default
+        audioBitRate = AudioQuality.AudioBitRate(rawValue: aDecoder.decodeInteger(forKey: NSStringFromSelector(#selector(getter: audioBitRate)))) ?? .default
         super.init()
     }
     
@@ -216,15 +197,6 @@ import AVFoundation
                 case .low: return .vga640x480
                 case .medium: return .iFrame960x540
                 case .high: return .iFrame1280x720
-                }
-            }
-            
-            public init?(rawValue: Int) {
-                switch rawValue {
-                case 0: self = .low
-                case 1: self = .medium
-                case 2: self = .high
-                default: return nil
                 }
             }
             
