@@ -83,7 +83,7 @@ import AVFoundation
     
     @objcMembers public class SSBSeqParmSet: NSObject {
         
-        private var pnalu: SSBNALUnit
+        private var pnalu: SSBNALUnit?
         public private(set) var frameBits = 0
         public private(set) var encodedWidth: Int64 = 0
         public private(set) var encodedHeight: Int64 = 0
@@ -92,11 +92,12 @@ import AVFoundation
         public private(set) var level: UInt = 0
         public private(set) var compact: CChar = 0
         
-        public init(pnalu: SSBNALUnit) {
-            self.pnalu = pnalu.copy() as! SSBNALUnit
+        public init(pnalu: SSBNALUnit? = nil) {
+            self.pnalu = pnalu?.copy() as? SSBNALUnit
             super.init()
         }
         
+        @discardableResult
         public func parse(pnalu: SSBNALUnit) -> Bool {
             guard pnalu.type == .sequenceParams else {
                 return false
@@ -160,7 +161,7 @@ import AVFoundation
                 encodedHeight *= 2
             }
             // ..rest are not interesting yes
-            self.pnalu = pnalu.copy() as! SSBNALUnit
+            self.pnalu = pnalu.copy() as? SSBNALUnit
             return false
         }
     }
@@ -257,6 +258,9 @@ import AVFoundation
     
     public private(set) var pStart: UnsafePointer<UInt8>?
     private var cBytes: Int
+    public var length: Int {
+        return cBytes
+    }
     public var type: NALType {
         guard let start = pStart?.pointee else {
             return .unknown
@@ -532,9 +536,7 @@ import AVFoundation
         super.init()
     }
     
-    
-    
-    public func encode(handler: @escaping encoderHandler, onParams: @escaping paramHandler) {
+    public func encode(handler: encoderHandler?, onParams: paramHandler?) {
         outputBlock = handler
         paramsBlock = onParams
         doesNeedParams = true
@@ -648,6 +650,10 @@ import AVFoundation
             pendingNALU = [Data]()
         }
         pendingNALU?.append(nalu)
+    }
+    
+    func getConfigData() -> Data? {
+        return avcC
     }
     
     private func onFileUpdate() {

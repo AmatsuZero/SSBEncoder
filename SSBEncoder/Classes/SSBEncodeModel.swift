@@ -8,7 +8,7 @@
 import Foundation
 
 @objcMembers open class SSBFrame: NSObject {
-    public var timestamp: UInt64 = 0
+    public var timestamp: Int64 = 0
     public var data: Data?
     /// flv或者rtmp包头
     public var header: Data?
