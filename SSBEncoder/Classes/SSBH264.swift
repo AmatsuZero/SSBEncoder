@@ -51,7 +51,7 @@ import AVFoundation
             // whole remaining parent space
             len = length - _nextChild
         }
-        if fourcc == OSType("uuid") {
+        if fourcc == "uuid".fourCharCode {
             cHeader += 16
         }
         guard len > 0, len + _nextChild > length else {
@@ -402,7 +402,7 @@ import AVFoundation
     // You have three leading zeros, so there are three data bits (010)
     // counting up from a base of 111: thus 111 + 010 = 1001 = 9
     @discardableResult
-    private func nextUE() -> UInt64 {
+    func nextUE() -> UInt64 {
         var cZero = 0
         while nextBit() == 0 {
             cZero += 1
@@ -460,11 +460,446 @@ import AVFoundation
 }
 
 @objcMembers open class SSBAVEncoder: NSObject {
+    public typealias encoderHandler = ([Data]?, CMTimeValue) -> Int
+    public typealias paramHandler = (Data?) -> Int
     
+    /// 50 MB switch point
+    private let OUTPUT_FILE_SWITCH_POINT = 50 * 1024 * 1024
+    
+    /// Filename "capture.mp4" wraps at capture5.mp4
+    private let MAX_FILENAME_INDEX = 5
+    
+    public var birthRate: Int {
+        didSet {
+            hasBitrateChanged = true
+        }
+    }
+    public private(set) var bitsPerSecond: Int = 0
+    
+    /// initial writer, used to obtain SPS/PPS from header
+    private var headerWriter: SSBVideoEncoder?
+    /// main encoder/writer
+    private var writer: SSBVideoEncoder?
+    
+    private var inputFile: FileHandle?
+    private var readQueue: DispatchQueue?
+    private var readSource: DispatchSourceRead?
+    
+    // index of current file name
+    private var isSwapping = false
+    private var currentFile = 1
+    private let width: Int
+    private let height: Int
+    
+    // param set data
+    private var avcC: Data?
+    private var lengthSize = 0
+    
+    // location of mdat
+    private var hasFoundMDAT = false
+    private var posMDAT: UInt64 = 0
+    private var bytesToNextAtom = 0
+    private var doesNeedParams = false
+    
+    // tracking if NALU is next frame
+    private var prevNalIdc = 0
+    private var prevNalType = 0
+    /// array of NSData comprising a single frame. each data is one nalu with no start code
+    private var pendingNALU: [Data]?
+    // FIFO for frame times
+    private var times = [CMTimeValue](repeating: 0, count: 10)
+    
+    private var outputBlock: encoderHandler?
+    private var paramsBlock: paramHandler?
+    /// estimate bitrate over first second
+    private var bitspersecond = 0
+    private var firstPTS: CMTimeValue = 0
+    private var hasBitrateChanged = false
+    
+    private func fileName() -> String {
+        return NSTemporaryDirectory().appending("capture\(currentFile).mp4")
+    }
+    
+    
+    public init(width: Int, height: Int, birthRate: Int) {
+        self.birthRate = birthRate
+        self.width = width
+        self.height = height
+        let path = NSTemporaryDirectory().appending("params.mp4")
+        headerWriter = .init(path: path, width: width, height: height, birthRate: birthRate)
+        // swap between 3 filenames
+        writer = .init(path: NSTemporaryDirectory().appending("capture\(currentFile).mp4"), width: width, height: height, birthRate: birthRate)
+        super.init()
+    }
+    
+    
+    
+    public func encode(handler: @escaping encoderHandler, onParams: @escaping paramHandler) {
+        outputBlock = handler
+        paramsBlock = onParams
+        doesNeedParams = true
+        pendingNALU = nil
+        firstPTS = -1
+        bitsPerSecond = 0
+    }
+    
+    public func encode(frame sampleBuffer: CMSampleBuffer) {
+        let presetime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let pts = presetime.value
+        
+        objc_sync_enter(self)
+        if doesNeedParams {
+            // the avcC record is needed for decoding and it's not written to the file until
+            // completion. We get round that by writing the first frame to two files; the first
+            // file (containing only one frame) is then finished, so we can extract the avcC record.
+            // Only when we've got that do we start reading from the main file.
+            doesNeedParams = false
+            if headerWriter?.encode(frame: sampleBuffer) == true {
+                headerWriter?.finish { [weak self] in
+                    self?.onParamsCompletion()
+                }
+            }
+        }
+        objc_sync_exit(self)
+        
+        objc_sync_enter(times)
+        times.append(pts)
+        objc_sync_exit(times)
+        
+        objc_sync_enter(self)
+        // switch output files when we reach a size limit
+        // to avoid runaway storage use.
+        if !isSwapping, let descriptpor = inputFile?.fileDescriptor {
+            var st = stat()
+            fstat(descriptpor, &st)
+            if st.st_size > OUTPUT_FILE_SWITCH_POINT || hasBitrateChanged {
+                hasBitrateChanged = false
+                isSwapping = true
+                let oldVideo = writer
+                // construct a new writer to the next filename
+                currentFile += 1
+                if currentFile > MAX_FILENAME_INDEX {
+                    currentFile = 1
+                }
+                writer = SSBVideoEncoder(path: fileName(), width: width, height: height, birthRate: birthRate)
+                // to do this seamlessly requires a few steps in the right order
+                // first, suspend the read source
+                if readSource != nil {
+                    readSource?.cancel()
+                    // execute the next step as a block on the same queue, to be sure the suspend is done
+                    readQueue?.async { [weak self] in
+                        self?.readSource = nil
+                        oldVideo?.finish {
+                            if let path = oldVideo?.path {
+                                self?.swapFiles(oldPath: path)
+                            }
+                        }
+                    }
+                } else if let path = oldVideo?.path {
+                    swapFiles(oldPath: path)
+                }
+            }
+        }
+        objc_sync_exit(self)
+        _ = writer?.encode(frame: sampleBuffer)
+    }
+    
+    public func shutdown() {
+        objc_sync_enter(self)
+        defer {
+            objc_sync_exit(self)
+        }
+        readSource = nil
+        headerWriter?.finish { [weak self] in
+            self?.headerWriter = nil
+        }
+        writer?.finish { [weak self] in
+            self?.writer = nil
+        }
+    }
+    
+    private func onNALU(_ nalu: Data) {
+        let idc = Int(nalu[0]) & 0x60
+        let naltype = Int(nalu[0]) & 0x1f
+        
+        if pendingNALU != nil {
+            let pnal = UnsafeMutablePointer<UInt8>.allocate(capacity: nalu.count)
+            nalu.copyBytes(to: pnal, count: nalu.count)
+            let nal = SSBNALUnit(pStart: pnal, len: nalu.count)
+            let bNew: Bool = {
+                if idc != prevNalIdc, idc * prevNalIdc != 0 {
+                    return true
+                } else if (naltype != prevNalType && naltype == 5) || (naltype == 5 && prevNalType == 5) {
+                    return true
+                } else if naltype >= 1, naltype <= 5 {
+                    nal.skip(bits: 8)
+                    return nal.nextUE() == 0
+                }
+                return false
+            }()
+            if bNew {
+                onEncodedFrame()
+                pendingNALU = nil
+            }
+        }
+        prevNalType = naltype
+        prevNalIdc = idc
+        if pendingNALU == nil {
+            pendingNALU = [Data]()
+        }
+        pendingNALU?.append(nalu)
+    }
+    
+    private func onFileUpdate() {
+        guard let inputFile = inputFile else {
+            return
+        }
+        // called whenever there is more data to read in the main encoder output file.
+        var s = stat()
+        fstat(inputFile.fileDescriptor, &s)
+        // locate the mdat atom if needed
+        var cReady = s.st_size - Int64(inputFile.offsetInFile)
+        while !hasFoundMDAT && cReady > 8 {
+            if bytesToNextAtom == 0 {
+                let hdr = inputFile.readData(ofLength: 8)
+                cReady -= 8
+                let lenAtom = Int(hdr.toHost())
+                let nameAtom = Int(hdr.advanced(by: 4).toHost())
+                if nameAtom == "mdat".fourCharCode! {
+                    hasFoundMDAT = true
+                    posMDAT = inputFile.offsetInFile - 8
+                } else {
+                    bytesToNextAtom = lenAtom - 8
+                }
+                if bytesToNextAtom > 0 {
+                    let cThis = cReady < bytesToNextAtom ? Int(cReady) : bytesToNextAtom
+                    bytesToNextAtom -= cThis
+                    inputFile.seek(toFileOffset: inputFile.offsetInFile + UInt64(cThis))
+                    cReady -= Int64(cThis)
+                }
+                guard hasFoundMDAT else { return }
+                readAndDeliver(Int(cReady))
+            }
+        }
+    }
+    
+    private func readAndDeliver(_ cReady: Int) {
+        guard let inputFile = inputFile else {
+            return
+        }
+        // Identify the individual NALUs and extract them
+        var cReady = cReady
+        while cReady > lengthSize {
+            let lenField = inputFile.readData(ofLength: lengthSize)
+            cReady -= lengthSize
+            let lenNALU = Int(lenField.toHost())
+            if lenNALU > cReady {
+                // whole NALU not present -- seek back to start of NALU and wait for more
+                inputFile.seek(toFileOffset: inputFile.offsetInFile - 4)
+                break
+            }
+            let nalu = inputFile.readData(ofLength: lenNALU)
+            cReady -= lenNALU
+            onNALU(nalu)
+        }
+    }
+    
+    public func onEncodedFrame() {
+        var pts: CMTimeValue = 0
+        objc_sync_enter(times)
+        if !times.isEmpty {
+            pts = times[0]
+            times.remove(at: 0)
+            if firstPTS < 0 {
+                firstPTS = pts
+            }
+            if pts - firstPTS < 1,
+                let bytes = pendingNALU?.reduce(0, { $1.count }) {
+                bitsPerSecond += (bytes * 8)
+            }
+        }
+        objc_sync_exit(times)
+        _ = outputBlock?(pendingNALU, pts)
+    }
+    
+    private func parse(path: String) -> Bool {
+        guard let file = FileHandle(forReadingAtPath: path) else {
+            return false
+        }
+        var s = stat()
+        fstat(file.fileDescriptor, &s)
+        let movie = SSBMP4Atom(atomAt: 0, size: Int(s.st_size), type: "file".fourCharCode!, inFile: file)
+        
+        var trak: SSBMP4Atom?
+        let trakType = "trak".fourCharCode!
+        if let moov = movie.child(of: "moov".fourCharCode!, startAt: 0) {
+            repeat {
+                trak = moov.nextChild()
+                if let t = trak, t.type == trakType {
+                    let tkhd = t.child(of: "tkhd".fourCharCode!, startAt: 0)
+                    let verflags = tkhd?.read(at: 0, size: 4)
+                    if let p = verflags?[3], p & 1 > 0 {
+                        break
+                    }
+                }
+            } while trak != nil
+        }
+        
+        var stsd: SSBMP4Atom?
+        if let trak = trak,
+            let media = trak.child(of: "mdia".fourCharCode!, startAt: 0),
+            let minf = media.child(of: "minf".fourCharCode!, startAt: 0),
+            let stbl = minf.child(of: "stbl".fourCharCode!, startAt: 0) {
+            stsd = stbl.child(of: "stsd".fourCharCode!, startAt: 0)
+        }
+        
+        if let stsd = stsd,
+            let avc1 = stsd.child(of: "avc1".fourCharCode!, startAt: 8),
+            let esd = avc1.child(of: "avcC".fourCharCode!, startAt: 78) {
+            avcC = esd.read(at: 0, size: Int(esd.length))
+            if let avcC = self.avcC {
+                lengthSize = Int(avcC[4]) & 3 + 1
+                return true
+            }
+        }
+        return false
+    }
+    
+    private func swapFiles(oldPath: String) {
+        guard let inputFile = inputFile else {
+            return
+        }
+        // save current position
+        let pos = inputFile.offsetInFile
+        // re-read mdat length
+        inputFile.seek(toFileOffset: posMDAT)
+        let hdr = inputFile.readData(ofLength: 4)
+        if !hdr.isEmpty {
+            let lenMDAT = hdr.toHost()
+            // extract nalus from saved position to mdat end
+            let posEnd = posMDAT + lenMDAT
+            let cRead = posEnd - pos
+            inputFile.seek(toFileOffset: pos)
+            readAndDeliver(Int(cRead))
+        }
+        // close and remove file
+        inputFile.closeFile()
+        hasFoundMDAT = false
+        bytesToNextAtom = 0
+        try? FileManager.default.removeItem(atPath: oldPath)
+        
+        // open new file and set up dispatch source
+        if let path = writer?.path, let input = FileHandle(forReadingAtPath: path) {
+            self.inputFile = input
+            readSource = DispatchSource.makeReadSource(fileDescriptor: input.fileDescriptor, queue: readQueue)
+            readSource?.setEventHandler(handler: { [weak self] in
+                self?.onFileUpdate()
+            })
+            readSource?.resume()
+            isSwapping = false
+        }
+    }
+    
+    private func onParamsCompletion() {
+        // the initial one-frame-only file has been completed
+        // Extract the avcC structure and then start monitoring the
+        // main file to extract video from the mdat chunk.
+        if let path = headerWriter?.path, parse(path: path) {
+            if let block = paramsBlock {
+                _ = block(avcC)
+            }
+            headerWriter = nil
+            isSwapping = false
+            if let p = writer?.path,
+                let input = FileHandle(forReadingAtPath: p) {
+                inputFile = input
+                readQueue = DispatchQueue(label: "com.ssb.SSBEncoder.avencoder.read")
+                readSource = DispatchSource.makeReadSource(fileDescriptor: input.fileDescriptor, queue: readQueue)
+                readSource?.setEventHandler(handler: { [weak self] in
+                    self?.onFileUpdate()
+                })
+                readSource?.resume()
+            }
+        }
+    }
 }
+
+@objcMembers open class SSBVideoEncoder: NSObject {
+    public let path: String
+    public let birthRate: Int
+    private let writer: AVAssetWriter?
+    private let writerInput: AVAssetWriterInput
+    
+    public init(path: String, width: Int, height: Int, birthRate: Int) {
+        self.path = path
+        self.birthRate = birthRate
+        let fileMgr = FileManager.default
+        try? fileMgr.removeItem(atPath: path)
+        writerInput = .init(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecH264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: birthRate,
+                AVVideoMaxKeyFrameIntervalKey: 30 * 2,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264High41,
+                AVVideoAllowFrameReorderingKey: false
+            ]
+        ])
+        writerInput.expectsMediaDataInRealTime = true
+        writer = try? .init(url: .init(fileURLWithPath: path), fileType: .mov)
+        writer?.add(writerInput)
+        super.init()
+    }
+    
+    public func finish(completionHandler: @escaping (() -> Void)) {
+        guard let writer = writer,
+            writer.status == .writing else {
+            return
+        }
+        writer.finishWriting(completionHandler: completionHandler)
+    }
+    
+    public func encode(frame sampleBuffer: CMSampleBuffer) -> Bool {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+            let writer = writer else {
+            return false
+        }
+        if writer.status == .unknown {
+            let startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startWriting()
+            writer.startSession(atSourceTime: startTime)
+        }
+        if writer.status == .failed {
+            return false
+        }
+        if writerInput.isReadyForMoreMediaData {
+            writerInput.append(sampleBuffer)
+            return true
+        }
+        return false
+    }
+}
+
 
 extension Data {
     func toHost() -> UInt64 {
         return (UInt64(self[0]) << 24) + (UInt64(self[1]) << 16) + (UInt64(self[2]) << 8) + UInt64(self[3])
+    }
+}
+
+
+extension UnsafePointer where Pointee == UInt8 {
+    func toHost() -> UInt {
+        return (UInt(self[0]) << 24) + (UInt(self[1]) << 16) + (UInt(self[2]) << 8) + UInt(self[3])
+    }
+}
+
+extension String {
+    var fourCharCode: FourCharCode? {
+        guard self.count == 4 else {
+            return nil
+        }
+        return self.utf16.reduce(0) { $0 << 8 + FourCharCode($1) }
     }
 }

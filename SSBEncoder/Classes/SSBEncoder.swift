@@ -13,7 +13,7 @@ import CoreMedia
     @objc optional func set(delegate: SSBVideoEncodingDelegate?)
 }
 
-@objcMembers open class SSBH264VideoEncoer: NSObject, SSBVideoEncoding {
+@objcMembers open class SSBH264VideoEncoder: NSObject, SSBVideoEncoding {
     
     public func encode(videoData pixelBuffer: CVPixelBuffer?, timeStamp: UInt64) {
         
