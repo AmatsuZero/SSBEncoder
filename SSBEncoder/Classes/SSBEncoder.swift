@@ -1,5 +1,6 @@
 import Foundation
 import CoreMedia
+import VideoToolbox
 
 private func getFilePath(by fileName: String) -> String {
     return NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!.appending("/\(fileName)")
@@ -37,7 +38,7 @@ private func getFilePath(by fileName: String) -> String {
     private var lastPTS = kCMTimeInvalid
     private let timeScale: CMTimeScale = 1000
     
-    var videoBitRate: Int {
+    public var videoBitRate: Int {
         get {
             return currentVideoBitRate
         }
@@ -47,7 +48,7 @@ private func getFilePath(by fileName: String) -> String {
         }
     }
     
-    init(videoStreamConfiguration configuration: SSBVideoConfiguration) {
+    public init(videoStreamConfiguration configuration: SSBVideoConfiguration) {
         self.configuration = configuration
         super.init()
         initCompressionSession()
@@ -231,5 +232,224 @@ private func getFilePath(by fileName: String) -> String {
     
     deinit {
         shutdown()
+    }
+}
+
+
+private func VideoCompressionOutputCallback(vtref: UnsafeMutableRawPointer?, vtfFrameRef: UnsafeMutableRawPointer?, status: OSStatus, inflags: VTEncodeInfoFlags, sample: CMSampleBuffer?) {
+    guard let sampleBuffer = sample,
+        let array = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true) else { return }
+    
+    let dic = CFArrayGetValueAtIndex(array, 0) as! CFDictionary
+    var key = kCMSampleAttachmentKey_NotSync
+    let isKeyFrame = !CFDictionaryContainsKey(dic, withUnsafePointer(to: &key, { UnsafeRawPointer($0) }))
+    
+    guard let timeStamp = vtfFrameRef?.assumingMemoryBound(to: Int64.self).pointee,
+        let videoEncoder = vtref?.assumingMemoryBound(to: SSBHardwareVideoEncoder.self).pointee,
+        status == noErr else {
+        return
+    }
+    
+    if isKeyFrame, videoEncoder.sps == nil,
+        let format = CMSampleBufferGetFormatDescription(sampleBuffer) {
+        var sparameterSetSize = 0
+        var sparamenterSetCount = 0
+        if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, 0, nil, &sparameterSetSize, &sparamenterSetCount, nil) == noErr {
+            let sparameterSet = UnsafeMutablePointer<UnsafePointer<UInt8>?>.allocate(capacity: sparameterSetSize)
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, 0, sparameterSet, nil, nil, nil)
+            
+            var pparameterSetSize = 0
+            var pparameterSetCount = 0
+            
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, 1, nil, &pparameterSetSize, &pparameterSetCount, nil) == noErr {
+                let pparameterSet = UnsafeMutablePointer<UnsafePointer<UInt8>?>.allocate(capacity: pparameterSetSize)
+                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, 1, pparameterSet, nil, nil, nil)
+                
+                videoEncoder.sps = Data(bytes: sparameterSet, count: sparameterSetSize)
+                videoEncoder.pps = Data(bytes: pparameterSet, count: pparameterSetSize)
+                
+                if videoEncoder.hasEnabledWriteVideoFile,
+                    let sps = videoEncoder.sps,
+                    let pps = videoEncoder.pps {
+                    var data = Data()
+                    let header = Data(bytes: [0x00, 0x00, 0x00, 0x01])
+                    data.append(header)
+                    data.append(sps)
+                    data.append(header)
+                    data.append(pps)
+                    fwrite((data as NSData).bytes, 1, data.count, videoEncoder.fp)
+                }
+            }
+        }
+    }
+    
+    var length = 0
+    var totalLength = 0
+    
+    guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer),
+        CMBlockBufferGetDataPointer(dataBuffer, 0, &length, &totalLength, nil) == noErr else {
+        return
+    }
+   
+    let dataPointer = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: totalLength)
+    CMBlockBufferGetDataPointer(dataBuffer, 0, nil, nil, dataPointer)
+    
+    var bufferOffset = 0
+    let AVCCHeaderLength = 4
+    
+    while bufferOffset < totalLength - AVCCHeaderLength {
+        // Read the NAL unit length
+        var nalUnitLength: UInt32 = 0
+        memcpy(&nalUnitLength, dataPointer.advanced(by: bufferOffset), AVCCHeaderLength)
+        
+        nalUnitLength =  CFSwapInt32BigToHost(nalUnitLength)
+        
+        let videoFrame = SSBVideoFrame()
+        videoFrame.timestamp = timeStamp
+        videoFrame.data = Data(bytes: dataPointer.advanced(by: bufferOffset + AVCCHeaderLength),
+                               count: Int(nalUnitLength))
+        videoFrame.isKeyFrame = isKeyFrame
+        videoFrame.sps = videoEncoder.sps
+        videoFrame.pps = videoEncoder.pps
+        
+        if let delegate = videoEncoder.delegate,
+            delegate.responds(to: #selector(SSBVideoEncodingDelegate.video(encoder:videoFrame:))) {
+            delegate.video(encoder: videoEncoder, videoFrame: videoFrame)
+        }
+        
+        if videoEncoder.hasEnabledWriteVideoFile,
+            let extra = videoFrame.data {
+            var data = Data()
+            let header = Data(bytes: isKeyFrame ? [0x00, 0x00, 0x00, 0x01] : [0x00, 0x00, 0x01])
+            data.append(header)
+            data.append(extra)
+            
+            fwrite((data as NSData).bytes, 1, data.count, videoEncoder.fp)
+        }
+        
+        bufferOffset += AVCCHeaderLength + Int(nalUnitLength)
+    }
+}
+
+@objcMembers open class SSBHardwareVideoEncoder: NSObject, SSBVideoEncoding {
+    
+    private var compressionSession: VTCompressionSession?
+    private var frameCount = 0
+    var sps: Data?
+    var pps: Data?
+    var fp: UnsafeMutablePointer<FILE>?
+    var hasEnabledWriteVideoFile = false
+    weak var delegate: SSBVideoEncodingDelegate?
+    private var currentVideoBitrate = 0
+    private var isBackground = false
+    private let configuration: SSBVideoConfiguration
+    
+    public var videoBitRate: Int {
+        set {
+            guard !isBackground, let compressionSession = self.compressionSession else { return }
+            VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_AverageBitRate, newValue as CFTypeRef)
+            VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_DataRateLimits, [Float(newValue) * 1.5 / 8, 1] as CFArray)
+            currentVideoBitrate = newValue
+        }
+        
+        get {
+            return currentVideoBitrate
+        }
+    }
+    
+    public init(videoStreamConfiguration configuration: SSBVideoConfiguration) {
+        self.configuration = configuration
+        super.init()
+        resetCompressionSession()
+        NotificationCenter.default.addObserver(self, selector: #selector(SSBHardwareVideoEncoder.willEnterBackground(notification:)),
+                                               name:.UIApplicationWillResignActive,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(SSBHardwareVideoEncoder.willEnterForeground(notification:)),
+                                               name: .UIApplicationDidBecomeActive,
+                                               object: nil)
+        #if DEBUG
+        hasEnabledWriteVideoFile = false
+        initForFilePath()
+        #endif
+    }
+    
+    public func encode(videoData pixelBuffer: CVPixelBuffer, timeStamp: Int64) {
+        guard !isBackground, let compressionSession = self.compressionSession else { return }
+        frameCount += 1
+        let presentationTimeStamp = CMTimeMake(Int64(frameCount), Int32(configuration.videoFrameRate))
+        var flags = VTEncodeInfoFlags()
+        let duration = CMTimeMake(1, Int32(configuration.videoFrameRate))
+        
+        var properties = [String: Any]()
+        if frameCount % configuration.videoMaxKeyframeInterval == 0 {
+            properties[kVTEncodeFrameOptionKey_ForceKeyFrame as String] = true
+        }
+        
+        var timeNumber = timeStamp
+        if VTCompressionSessionEncodeFrame(compressionSession, pixelBuffer, presentationTimeStamp,
+                                           duration, properties as CFDictionary, &timeNumber, &flags) != noErr {
+            resetCompressionSession()
+        }
+    }
+    
+    public func stop() {
+        if let compressionSession = self.compressionSession {
+            VTCompressionSessionCompleteFrames(compressionSession, kCMTimeIndefinite)
+        }
+    }
+    
+    public func set(delegate: SSBVideoEncodingDelegate?) {
+        self.delegate = delegate
+    }
+    
+    private func resetCompressionSession() {
+        if let compressionSession = self.compressionSession {
+            VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid)
+            VTCompressionSessionInvalidate(compressionSession)
+            self.compressionSession = nil
+        }
+        var mySelf = self
+        guard VTCompressionSessionCreate(nil, Int32(configuration.videoSize.width), Int32(configuration.videoSize.height),
+                                                kCMVideoCodecType_H264, nil, nil, nil,
+                                                VideoCompressionOutputCallback,
+                                                withUnsafeMutablePointer(to: &mySelf, { UnsafeMutableRawPointer($0)}),
+                                                &compressionSession) == noErr,
+            let compressionSession = self.compressionSession else { return }
+        
+        currentVideoBitrate = configuration.videoBitRate
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_MaxKeyFrameInterval, configuration.videoMaxKeyframeInterval as CFTypeRef)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, (configuration.videoMaxKeyframeInterval / configuration.videoFrameRate) as CFTypeRef)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_ExpectedFrameRate, configuration.videoFrameRate as CFTypeRef)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_AverageBitRate, configuration.videoBitRate as CFTypeRef)
+        let limit: [Float] = [Float(configuration.videoBitRate) * 1.5 / 8, 1]
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_DataRateLimits, limit as CFArray)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Main_AutoLevel)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanTrue)
+        VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC)
+        VTCompressionSessionPrepareToEncodeFrames(compressionSession)
+    }
+    
+    private func initForFilePath() {
+        let path = getFilePath(by: "IOSCamDemo.h264")
+        fp = fopen(path.cString(using: .utf8), "wb".cString(using: .utf8))
+    }
+    
+    func willEnterBackground(notification: Notification) {
+        isBackground = true
+    }
+    
+    func willEnterForeground(notification: Notification) {
+        resetCompressionSession()
+        isBackground = false
+    }
+    
+    deinit {
+        if let compressionSession = self.compressionSession {
+            VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid)
+            VTCompressionSessionInvalidate(compressionSession)
+            self.compressionSession = nil
+        }
+        NotificationCenter.default.removeObserver(self)
     }
 }
