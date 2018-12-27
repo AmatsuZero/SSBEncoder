@@ -8,7 +8,7 @@
 import UIKit
 import AVFoundation
 
-@objcMembers open class SSBAudioConfiguration: NSObject, NSCopying, NSCoding {
+@objcMembers open class SSBLiveAudioConfiguration: NSObject, NSCopying, NSCoding {
     
     ///  Audio Live quality（音频质量）
     @objc public enum AudioQuality: Int {
@@ -132,7 +132,7 @@ import AVFoundation
     }
     
     public func copy(with zone: NSZone? = nil) -> Any {
-        let instance = SSBAudioConfiguration()
+        let instance = SSBLiveAudioConfiguration()
         instance.numberOfChannels = numberOfChannels
         instance.audioBitRate = audioBitRate
         instance.sampleRate = sampleRate
@@ -141,7 +141,7 @@ import AVFoundation
     }
     
     open override func isEqual(_ object: Any?) -> Bool {
-        guard let other = object as? SSBAudioConfiguration else {
+        guard let other = object as? SSBLiveAudioConfiguration else {
             return false
         }
         return numberOfChannels == other.numberOfChannels

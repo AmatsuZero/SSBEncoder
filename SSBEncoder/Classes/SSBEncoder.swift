@@ -10,6 +10,20 @@ private func getFilePath(by fileName: String) -> String {
     @objc func encode(videoData pixelBuffer: CVPixelBuffer, timeStamp: Int64)
 }
 
+/// 编码器抽象的接口
+@objc public protocol SSBAudioEncoding: NSObjectProtocol {
+    @objc func encode(audioData: Data?, timeStamp: Int64)
+    @objc func stop()
+    @objc init(audioStreamConfiguration: SSBLiveAudioConfiguration)
+    @objc optional func setDelagate(_ delegate: SSBAudioEncodingDelegate)
+    @objc optional func adts(data channel: Int, rawDataLength length: Int) -> Data
+}
+
+/// 编码器编码后回调
+@objc public protocol SSBAudioEncodingDelegate: NSObjectProtocol {
+    @objc func encoder(_ encoder: SSBAudioEncoding, audioFrame: SSBAudioFrame)
+}
+
 @objc public protocol SSBVideoEncodingDelegate: NSObjectProtocol {
     @objc func video(encoder: SSBVideoEncoding?, videoFrame frame: SSBVideoFrame?)
     @objc optional var videoBitRate: Int { get set }
@@ -22,7 +36,7 @@ private func getFilePath(by fileName: String) -> String {
     
     private var fp: UnsafeMutablePointer<FILE>?
     private var frameCount = 0
-    private var enabledWriteVideoFile = false
+    private var enabledWriteVideoFile = true
     private let configuration: SSBVideoConfiguration
     private let sendQueue = DispatchQueue(label: "com.ssb.h264.sendframe")
     private let naluStartCode = Data(bytes:  [0x00, 0x00, 0x00, 0x01])
@@ -235,7 +249,6 @@ private func getFilePath(by fileName: String) -> String {
     }
 }
 
-
 private func VideoCompressionOutputCallback(vtref: UnsafeMutableRawPointer?, vtfFrameRef: UnsafeMutableRawPointer?, status: OSStatus, inflags: VTEncodeInfoFlags, sample: CMSampleBuffer?) {
     guard let sampleBuffer = sample,
         let array = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true) else { return }
@@ -338,7 +351,7 @@ private func VideoCompressionOutputCallback(vtref: UnsafeMutableRawPointer?, vtf
     var sps: Data?
     var pps: Data?
     var fp: UnsafeMutablePointer<FILE>?
-    var hasEnabledWriteVideoFile = false
+    var hasEnabledWriteVideoFile = true
     weak var delegate: SSBVideoEncodingDelegate?
     private var currentVideoBitrate = 0
     private var isBackground = false
@@ -453,3 +466,218 @@ private func VideoCompressionOutputCallback(vtref: UnsafeMutableRawPointer?, vtf
         NotificationCenter.default.removeObserver(self)
     }
 }
+
+/// AudioConverterFillComplexBuffer 编码过程中，会要求这个函数来填充输入数据，也就是原始PCM数据
+private func inputDataProc(inConverter: AudioConverterRef,
+                   ioNumberDataPackets: UnsafeMutablePointer<UInt32>,
+                   ioData: UnsafeMutablePointer<AudioBufferList>,
+                   outDataPacketDescription: UnsafeMutablePointer<UnsafeMutablePointer<AudioStreamPacketDescription>?>?,
+                   inUserData: UnsafeMutableRawPointer?) -> OSStatus {
+    if let bufferList = inUserData?.assumingMemoryBound(to: AudioBufferList.self) {
+        let ptr = UnsafeMutableAudioBufferListPointer(bufferList)[0]
+        var io = UnsafeMutableAudioBufferListPointer(ioData)[0]
+        io.mNumberChannels = 1
+        io.mData = ptr.mData
+        io.mDataByteSize = ptr.mDataByteSize
+    }
+    return noErr
+}
+
+@objcMembers open class SSBHardwareAudioEncoder: NSObject, SSBAudioEncoding {
+    
+    private var fp: UnsafeMutablePointer<FILE>?
+    private var enabledWriteAudioFile = true
+    private var leftLength = 0
+    private let leftBuf: UnsafeMutablePointer<CChar>
+    private let aacBuf: UnsafeMutablePointer<CChar>
+    private weak var delegate: SSBAudioEncodingDelegate?
+    private let configuration: SSBLiveAudioConfiguration
+    private var converter: AudioConverterRef?
+    
+    required public init(audioStreamConfiguration: SSBLiveAudioConfiguration) {
+        configuration = audioStreamConfiguration
+        leftBuf = UnsafeMutablePointer<CChar>.allocate(capacity: configuration.bufferLength)
+        aacBuf = UnsafeMutablePointer<CChar>.allocate(capacity: configuration.bufferLength)
+        super.init()
+        #if DEBUG
+        enabledWriteAudioFile = false
+        initForFilePath()
+        #endif
+    }
+    
+    public func encode(audioData: Data?, timeStamp: Int64) {
+        if leftLength + (audioData?.count ?? 0) >= configuration.bufferLength {
+            ///<  发送
+            let totalSize = leftLength + (audioData?.count ?? 0)
+            let encodeCount = totalSize / configuration.bufferLength
+            
+            let totalBuf = malloc(totalSize)
+            let p = totalBuf
+            
+            memset(totalBuf, Int32(totalSize), 0)
+            memcpy(totalBuf, leftBuf, leftLength)
+            memcpy(totalBuf?.advanced(by: leftLength), (audioData as NSData?)?.bytes, audioData?.count ?? 0)
+            
+            for _ in 0..<encodeCount {
+                encode(buffer: p, timeStamp: timeStamp)
+                _ = p?.advanced(by: configuration.bufferLength)
+            }
+            
+            leftLength = totalSize % configuration.bufferLength
+            memset(leftBuf, 0, configuration.bufferLength)
+            memcpy(leftBuf, totalBuf?.advanced(by: totalSize - leftLength), leftLength)
+            
+            free(totalBuf)
+        } else {
+            ///< 积累
+            memcpy(leftBuf.advanced(by: leftLength), (audioData as NSData?)?.bytes, audioData?.count ?? 0)
+            leftLength += audioData?.count ?? 0
+        }
+    }
+    
+    public func stop() {
+        
+    }
+    
+    private func initForFilePath() {
+        let path = getFilePath(by: "IOSCamDemo_HW.aac")
+        fp = fopen(path.cString(using: .utf8), "wb".cString(using: .utf8))
+    }
+    
+    public func setDelagate(_ delegate: SSBAudioEncodingDelegate) {
+        self.delegate = delegate
+    }
+    
+    func createAudioConvert() -> Bool {
+        guard converter == nil else {
+            return true
+        }
+        
+        var inputFormat = AudioStreamBasicDescription()
+        inputFormat.mSampleRate = Float64(configuration.sampleRate.rawValue)
+        inputFormat.mFormatID = kAudioFormatLinearPCM
+        inputFormat.mFormatFlags = kAudioFormatFlagIsSignedInteger
+            | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked
+        inputFormat.mChannelsPerFrame = UInt32(configuration.numberOfChannels)
+        inputFormat.mFramesPerPacket = 1
+        inputFormat.mBitsPerChannel = 16
+        inputFormat.mBytesPerFrame = inputFormat.mBitsPerChannel / 8 * inputFormat.mChannelsPerFrame
+        inputFormat.mBytesPerPacket = inputFormat.mBytesPerFrame * inputFormat.mBytesPerPacket
+        // 这里开始是输出音频格式
+        var outputFormat = AudioStreamBasicDescription()
+        memset(&outputFormat, 0, MemoryLayout.size(ofValue: outputFormat))
+        outputFormat.mSampleRate = inputFormat.mSampleRate // 采样率保持一致
+        outputFormat.mFormatID = kAudioFormatMPEG4AAC // AAC编码 kAudioFormatMPEG4AAC kAudioFormatMPEG4AAC_HE_V2
+        outputFormat.mChannelsPerFrame = UInt32(configuration.numberOfChannels)
+        outputFormat.mFramesPerPacket = 1024 // AAC一帧是1024个字节
+        
+        let subType = kAudioFormatMPEG4AAC
+        let requestedCodecs = [
+            AudioClassDescription(mType:kAudioEncoderComponentType, mSubType: subType, mManufacturer: kAppleSoftwareAudioCodecManufacturer),
+            AudioClassDescription(mType:kAudioEncoderComponentType, mSubType: subType, mManufacturer: kAppleSoftwareAudioCodecManufacturer)
+        ]
+        let result = AudioConverterNewSpecific(&inputFormat, &outputFormat, 2, requestedCodecs, &converter)
+        var outputBitrate = configuration.audioBitRate
+        let propSize = MemoryLayout.size(ofValue: outputBitrate)
+        
+        if result == noErr, let converter = converter {
+            AudioConverterSetProperty(converter, kAudioConverterEncodeBitRate, UInt32(propSize), &outputBitrate)
+        }
+        return true
+    }
+    
+    /**
+     *  Add ADTS header at the beginning of each and every AAC packet.
+     *  This is needed as MediaCodec encoder generates a packet of raw
+     *  AAC data.
+     *
+     *  Note the packetLen must count in the ADTS header itself.
+     *  See: http://wiki.multimedia.cx/index.php?title=ADTS
+     *  Also: http://wiki.multimedia.cx/index.php?title=MPEG-4_Audio#Channel_Configurations
+     **/
+    public func adts(data channel: Int, rawDataLength length: Int) -> Data {
+        let adtsLength = 7
+        var packet = [Int](repeating: 0, count: adtsLength)
+        // Variables Recycled by addADTStoPacket
+        let profile = 2  //AAC LC
+        //39=MediaCodecInfo.CodecProfileLevel.AACObjectELD;
+        let freqIdx = configuration.sampleRate.sampleRateIndex
+        let chanCfg = channel //MPEG-4 Audio Channel Configuration. 1 Channel front-center
+        let fullLength = adtsLength + length
+        // fill in ADTS data
+        packet[0] = 0xff // 11111111     = syncword
+        packet[1] = 0xf9 // 1111 1 00 1  = syncword MPEG-2 Layer CRC
+        packet[2] = ((profile - 1) << 6) + (freqIdx << 2) + (chanCfg >> 2)
+        packet[3] = ((chanCfg & 3) << 6) + (fullLength >> 11)
+        packet[4] = (fullLength & 0x7ff) >> 3
+        packet[5] = ((fullLength & 7) << 5) + 0x1F
+        packet[6] = 0xfc
+        return Data(bytes: &packet, count: adtsLength)
+    }
+    
+    private func encode(buffer: UnsafeMutableRawPointer?, timeStamp: Int64) {
+        var inBuffer = AudioBuffer()
+        inBuffer.mNumberChannels = 1
+        inBuffer.mData = buffer
+        inBuffer.mDataByteSize = UInt32(configuration.bufferLength)
+        
+        var buffers = AudioBufferList()
+        buffers.mNumberBuffers = 1
+        UnsafeMutableAudioBufferListPointer(&buffers)[0] = inBuffer
+        // 初始化一个输出缓冲列表
+        var outBufferList = AudioBufferList()
+        outBufferList.mNumberBuffers = 1
+        
+        var newBuffer = inBuffer
+        newBuffer.mDataByteSize = inBuffer.mDataByteSize // 设置缓冲区大小
+        newBuffer.mData = UnsafeMutableRawPointer(aacBuf) // 设置AAC缓冲区
+        UnsafeMutableAudioBufferListPointer(&outBufferList)[0] = newBuffer
+    
+        var outputDataPacketSize: UInt32 = 1
+        guard let converter = converter,
+            AudioConverterFillComplexBuffer(converter, inputDataProc, &buffers, &outputDataPacketSize, &outBufferList, nil) == noErr else {
+            return
+        }
+        let audioFrame = SSBAudioFrame()
+        audioFrame.timestamp = timeStamp
+        audioFrame.data = Data(bytes: aacBuf, count: Int(UnsafeMutableAudioBufferListPointer(&outBufferList)[0].mDataByteSize))
+        let extData = [configuration.asc[0], configuration.asc[1]]
+        audioFrame.audioInfo = Data(bytes: extData, count: extData.count)
+        if let delegate = delegate, delegate.responds(to: #selector(SSBAudioEncodingDelegate.encoder(_:audioFrame:))) {
+            delegate.encoder(self, audioFrame: audioFrame)
+        }
+        if enabledWriteAudioFile {
+            let adts = self.adts(data: configuration.numberOfChannels, rawDataLength: audioFrame.data?.count ?? 0)
+            fwrite((adts as NSData).bytes, 1, adts.count, fp)
+            fwrite((audioFrame.data as NSData?)?.bytes, 1, audioFrame.data?.count ?? 0, fp)
+        }
+        
+    }
+    
+    deinit {
+        leftBuf.deallocate()
+        aacBuf.deallocate()
+    }
+}
+
+extension Int {
+    func sampleIndex() -> Int {
+        switch self {
+        case 96000: return 0
+        case 88200: return 1
+        case 64000: return 2
+        case 48000: return 3
+        case 44100: return 4
+        case 32000: return 5
+        case 24000: return 6
+        case 22050: return 7
+        case 16000: return 8
+        case 12000: return 9
+        case 11025: return 10
+        case 8000: return 11
+        case 7350: return 12
+        default: return 15
+        }
+    }
+}
+
