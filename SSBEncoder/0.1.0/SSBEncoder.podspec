@@ -18,7 +18,7 @@ Pod::Spec.new do |s|
   s.homepage         = 'https://github.com/AmatsuZero/SSBEncoder'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'AmatsuZero' => 'jiangzhenhua@baidu.com' }
-  s.source           = { :git => 'https://github.com/AmatsuZero/SSBEncoder.git', :commit=> '69c3324' }
+  s.source           = { :git => 'https://github.com/AmatsuZero/SSBEncoder.git', :tag => s.version.to_s}
   s.swift_version = '4.0'
   s.ios.deployment_target = '8.0'
   s.source_files = 'SSBEncoder/Classes/**/*'
