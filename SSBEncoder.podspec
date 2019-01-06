@@ -9,34 +9,18 @@
 Pod::Spec.new do |s|
   s.name             = 'SSBEncoder'
   s.version          = '0.1.1'
-  s.summary          = 'A short description of SSBEncoder.'
-
-# This description is used to generate tags and improve search results.
-#   * Think: What does it do? Why did you write it? What is the focus?
-#   * Try to keep it short, snappy and to the point.
-#   * Write the description between the DESC delimiters below.
-#   * Finally, don't worry about the indent, CocoaPods strips it!
-
+  s.summary          = '直播编解码相关'
   s.description      = <<-DESC
-TODO: Add long description of the pod here.
+  直播音视频编解码
                        DESC
 
   s.homepage         = 'https://github.com/AmatsuZero/SSBEncoder'
-  # s.screenshots     = 'www.example.com/screenshots_1', 'www.example.com/screenshots_2'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'AmatsuZero' => 'jiangzhenhua@baidu.com' }
   s.source           = { :git => 'https://github.com/AmatsuZero/SSBEncoder.git', :tag => s.version.to_s }
-  # s.social_media_url = 'https://twitter.com/<TWITTER_USERNAME>'
 
   s.ios.deployment_target = '8.0'
-
+  s.swift_version = '4.0'
   s.source_files = 'SSBEncoder/Classes/**/*'
-  
-  # s.resource_bundles = {
-  #   'SSBEncoder' => ['SSBEncoder/Assets/*.png']
-  # }
-
-  # s.public_header_files = 'Pod/Classes/**/*.h'
   s.frameworks = 'UIKit', 'AVFoundation', 'CoreMedia'
-  # s.dependency 'AFNetworking', '~> 2.3'
 end
