@@ -421,11 +421,10 @@ private func VideoCompressionOutputCallback(vtref: UnsafeMutableRawPointer?, vtf
             VTCompressionSessionInvalidate(compressionSession)
             self.compressionSession = nil
         }
-        var mySelf = self
         guard VTCompressionSessionCreate(nil, Int32(configuration.videoSize.width), Int32(configuration.videoSize.height),
                                                 kCMVideoCodecType_H264, nil, nil, nil,
                                                 VideoCompressionOutputCallback,
-                                                withUnsafeMutablePointer(to: &mySelf, { UnsafeMutableRawPointer($0)}),
+                                                UnsafeMutableRawPointer(mutating: bridge(obj: self)),
                                                 &compressionSession) == noErr,
             let compressionSession = self.compressionSession else { return }
         
@@ -681,3 +680,18 @@ extension Int {
     }
 }
 
+func bridge<T : AnyObject>(obj : T) -> UnsafeRawPointer {
+    return UnsafeRawPointer(Unmanaged.passUnretained(obj).toOpaque())
+}
+
+func bridge<T : AnyObject>(ptr : UnsafeRawPointer) -> T {
+    return Unmanaged<T>.fromOpaque(ptr).takeUnretainedValue()
+}
+
+func bridgeRetained<T : AnyObject>(obj : T) -> UnsafeRawPointer {
+    return UnsafeRawPointer(Unmanaged.passRetained(obj).toOpaque())
+}
+
+func bridgeTransfer<T : AnyObject>(ptr : UnsafeRawPointer) -> T {
+    return Unmanaged<T>.fromOpaque(ptr).takeRetainedValue()
+}
